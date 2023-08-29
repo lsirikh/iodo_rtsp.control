@@ -1,0 +1,96 @@
+using System;
+using System.Security.Authentication;
+using System.Threading;
+using System.Threading.Tasks;
+using Iodo.Rtsp;
+using Iodo.Rtsp.RawFrames;
+using Iodo.Rtsp.Rtsp;
+
+namespace Iodo.Assets.RtspControl.Entities.Received;
+
+public class RawFramesSource : IRawFramesSource
+{
+	private static readonly TimeSpan RetryDelay = TimeSpan.FromSeconds(5.0);
+
+	private readonly ConnectionParameters _connectionParameters;
+
+	private Task _workTask = Task.CompletedTask;
+
+	private CancellationTokenSource _cancellationTokenSource;
+
+	public EventHandler<RawFrame> FrameReceived { get; set; }
+
+	public EventHandler<string> ConnectionStatusChanged { get; set; }
+
+	public RawFramesSource(ConnectionParameters connectionParameters)
+	{
+		_connectionParameters = connectionParameters ?? throw new ArgumentNullException("connectionParameters");
+	}
+
+	public void Start()
+	{
+		_cancellationTokenSource = new CancellationTokenSource();
+		CancellationToken token = _cancellationTokenSource.Token;
+		_workTask = _workTask.ContinueWith((Func<Task, Task>)async delegate
+		{
+			await ReceiveAsync(token);
+		}, token);
+	}
+
+	public void Stop()
+	{
+		_cancellationTokenSource.Cancel();
+	}
+
+	private async Task ReceiveAsync(CancellationToken token)
+	{
+		try
+		{
+			using RtspClient rtspClient = new RtspClient(_connectionParameters);
+			rtspClient.FrameReceived += RtspClientOnFrameReceived;
+			while (true)
+			{
+				OnStatusChanged("Connecting...");
+				try
+				{
+					await rtspClient.ConnectAsync(token);
+				}
+				catch (InvalidCredentialException)
+				{
+					OnStatusChanged("Invalid login and/or password");
+					await Task.Delay(RetryDelay, token);
+					continue;
+				}
+				catch (RtspClientException e2)
+				{
+					OnStatusChanged(e2.ToString());
+					await Task.Delay(RetryDelay, token);
+					continue;
+				}
+				OnStatusChanged("Receiving frames...");
+				try
+				{
+					await rtspClient.ReceiveAsync(token);
+				}
+				catch (RtspClientException e)
+				{
+					OnStatusChanged(e.ToString());
+					await Task.Delay(RetryDelay, token);
+				}
+			}
+		}
+		catch (OperationCanceledException)
+		{
+		}
+	}
+
+	private void RtspClientOnFrameReceived(object sender, RawFrame rawFrame)
+	{
+		FrameReceived?.Invoke(this, rawFrame);
+	}
+
+	private void OnStatusChanged(string status)
+	{
+		ConnectionStatusChanged?.Invoke(this, status);
+	}
+}
